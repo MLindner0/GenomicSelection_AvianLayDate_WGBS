@@ -1,0 +1,543 @@
+# import cvv
+import csv
+
+# make dictionary for adding read groups to alignments:
+# for how to make .csv files, see make_csv_for_dictionary.R
+new_data_dict = {}
+with open("src/Run_seq2018.csv", 'r') as data_file:
+    data = csv.DictReader(data_file, delimiter=",")
+    for row in data:
+        item = new_data_dict.get(row["Sample"], dict())
+        item[row["Key"]] = row["Value"]
+        new_data_dict[row["Sample"]] = item
+
+print(new_data_dict)
+dict_seq2018 = new_data_dict
+
+new_data_dict = {}
+with open("src/Run_reseq2020.csv", 'r') as data_file:
+    data = csv.DictReader(data_file, delimiter=",")
+    for row in data:
+        item = new_data_dict.get(row["Sample"], dict())
+        item[row["Key"]] = row["Value"]
+        new_data_dict[row["Sample"]] = item
+
+print(new_data_dict)
+dict_reseq2020 = new_data_dict
+
+new_data_dict = {}
+with open("src/Run_reseq2020_SP.csv", 'r') as data_file:
+    data = csv.DictReader(data_file, delimiter=",")
+    for row in data:
+        item = new_data_dict.get(row["Sample"], dict())
+        item[row["Key"]] = row["Value"]
+        new_data_dict[row["Sample"]] = item
+
+print(new_data_dict)
+dict_reseq2020_SP = new_data_dict
+
+dict_Readgroup = dict(seq2018 = dict_seq2018, reseq2020 = dict_reseq2020, reseq2020_SP = dict_reseq2020_SP)
+
+dict_CovFilter_Individuals = {"Auto": 127, "Z": 132}
+dict_CovFilter_Pools = {"Auto": 284, "Z": 233}
+
+
+# define wildcards
+SAMPLE, = glob_wildcards("../WGBS_Snakemake_Bismark/trimmed_data/reseq2020/{sample}_R1_val_1.fq.gz")
+NEW, = glob_wildcards("../WGBS_Snakemake_Bismark/trimmed_data/reseq2020_SP/{new}_R1_val_1.fq.gz")
+RUN = ["seq2018", "reseq2020"]
+CHR = ["Auto", "Z"]
+
+# get samples in two runs only:
+tworuns = set(SAMPLE) - set(NEW)
+OLD = list(tworuns)
+print(OLD)
+
+# get individual samples and pooled samples
+INDIVIDUALS = []
+for ind in SAMPLE:
+    if re.match(r"F3_[A-Z]_BD+", ind):
+        INDIVIDUALS.append(ind)
+print(INDIVIDUALS)
+
+notindiv = set(SAMPLE) - set(INDIVIDUALS)
+POOLS = list(notindiv)
+print(POOLS)
+
+# constrain wildcard
+wildcard_constraints:
+    sample = '|'.join([re.escape(x) for x in SAMPLE]),
+    new = '|'.join([re.escape(x) for x in NEW]),
+    old = '|'.join([re.escape(x) for x in OLD]),
+    run = '|'.join([re.escape(x) for x in RUN]),
+    chr = '|'.join([re.escape(x) for x in CHR]),
+    individuals = '|'.join([re.escape(x) for x in INDIVIDUALS]),
+    pools = '|'.join([re.escape(x) for x in POOLS])
+
+
+rule all:
+    input:
+        expand("alignments/BS-conversion/{run}_{sample}_out", run=RUN, sample=SAMPLE),
+        expand("alignments/BS-conversion/reseq2020_SP_{new}_out", new=NEW),
+        "snps/SNPs_merged_POOLS.bcf",
+        "snps/SNPs_merged.bcf"
+
+# repeat alignments; use old flags for CGmaptools input
+rule align1:
+    input:
+        R1Tr="../WGBS_Snakemake_Bismark/trimmed_data/{run}/{sample}_R1_val_1.fq.gz",
+        R2Tr="../WGBS_Snakemake_Bismark/trimmed_data/{run}/{sample}_R2_val_2.fq.gz"
+    output:
+        Align="alignments/{run}/{sample}_R1_val_1_bismark_bt2_pe.bam",
+        Report="alignments/{run}/{sample}_R1_val_1_bismark_bt2_PE_report.txt"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{run}/{sample}_align_OF.log"
+    threads: 8
+    shell:
+        "(bismark --genome /home/nioo/melaniel/projects/WGBS_rbc_reseq2020/genome/ -1 {input.R1Tr} -2 {input.R2Tr} --old_flag --no_dovetail --parallel 8 --temp_dir alignments/temp/{wildcards.run} -o alignments/{wildcards.run}) 2> {log}"
+
+rule align2:
+    input:
+        R1Tr="../WGBS_Snakemake_Bismark/trimmed_data/reseq2020_SP/{new}_R1_val_1.fq.gz",
+        R2Tr="../WGBS_Snakemake_Bismark/trimmed_data/reseq2020_SP/{new}_R2_val_2.fq.gz"
+    output:
+        Align="alignments/reseq2020_SP/{new}_R1_val_1_bismark_bt2_pe.bam",
+        Report="alignments/reseq2020_SP/{new}_R1_val_1_bismark_bt2_PE_report.txt"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/reseq2020_SP/{new}_align_OF.log"
+    threads: 8
+    shell:
+        "(bismark --genome /home/nioo/melaniel/projects/WGBS_rbc_reseq2020/genome/ -1 {input.R1Tr} -2 {input.R2Tr} --old_flag --no_dovetail --parallel 8 --temp_dir alignments/temp/reseq2020_SP -o alignments/reseq2020_SP) 2> {log}"
+
+# get bisulfite conversion
+rule BSconv:
+    input:
+        "alignments/{run}/{sample}_R1_val_1_bismark_bt2_PE_report.txt"
+    output:
+        "alignments/BS-conversion/{run}_{sample}_out"
+    log:
+        "logs/{run}/{sample}_BSconv.log"
+    threads: 1
+    shell:
+        """
+        grep 'C methylated in CHG context:' {input} | sed -e 's/%//g' | awk -v OFS='\t' '{{print $6,(100-$6),"{wildcards.run}","{wildcards.sample}"}}' > {output}
+        """
+
+# get bisulfite conversion
+rule BSconv2:
+    input:
+        "alignments/reseq2020_SP/{new}_R1_val_1_bismark_bt2_PE_report.txt"
+    output:
+        "alignments/BS-conversion/reseq2020_SP_{new}_out"
+    log:
+        "logs/reseq2020_SP/{new}_BSconv.log"
+    threads: 1
+    shell:
+        """
+        grep 'C methylated in CHG context:' {input} | sed -e 's/%//g' | awk -v OFS='\t' '{{print $6,(100-$6),"reseq2020_SP","{wildcards.new}"}}' > {output}
+        """
+
+rule dedup1:
+    input:
+        "alignments/{run}/{sample}_R1_val_1_bismark_bt2_pe.bam"
+    output:
+        "alignments/{run}/{sample}.deduplicated.bam"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{run}/{sample}_dedup_OF.log"
+    threads: 1
+    shell:
+        "(deduplicate_bismark -p --output_dir alignments/{wildcards.run} -o {wildcards.sample} {input}) 2> {log}"
+
+rule dedup2:
+    input:
+        "alignments/reseq2020_SP/{new}_R1_val_1_bismark_bt2_pe.bam"
+    output:
+        "alignments/reseq2020_SP/{new}.deduplicated.bam"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/reseq2020_SP/{new}_dedup_OF.log"
+    threads: 1
+    shell:
+        "(deduplicate_bismark -p --output_dir alignments/reseq2020_SP -o {wildcards.new} {input}) 2> {log}"
+
+# add read group to samples; use dict_Readgroup; different number of samples within third run; extra rule (readgr2) for third run
+rule readgr1:
+    input:
+        "alignments/{run}/{sample}.deduplicated.bam"
+    output:
+        "alignments/{run}/{sample}.deduplicated.withRG.bam"
+    params:
+        Lane=lambda wildcards: dict_Readgroup[wildcards.run][wildcards.sample]['Lane'],
+        Barcode=lambda wildcards: dict_Readgroup[wildcards.run][wildcards.sample]['Barcode'],
+        Library=lambda wildcards: dict_Readgroup[wildcards.run][wildcards.sample]['Library'],
+        Flowcell=lambda wildcards: dict_Readgroup[wildcards.run][wildcards.sample]['Flowcell']
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{run}/{sample}_RG_OF.log"
+    threads: 1
+    shell:
+        "(picard -Xmx2g AddOrReplaceReadGroups I={input} O={output} ID={params.Flowcell}.{params.Lane} LB=KapaBiosystems-{params.Library} PL=illumina PU={params.Flowcell}.{params.Lane}.{params.Barcode} SM={wildcards.sample} CREATE_INDEX=true VALIDATION_STRINGENCY=SILENT SORT_ORDER=queryname) 2> {log}"
+
+# add read group to samples; use dict_Readgroup; different number of samples within third run; extra rule (readgr2) for third run
+rule readgr2:
+    input:
+        "alignments/reseq2020_SP/{new}.deduplicated.bam"
+    output:
+        "alignments/reseq2020_SP/{new}.deduplicated.withRG.bam"
+    params:
+        Lane=lambda wildcards: dict_Readgroup['reseq2020_SP'][wildcards.new]['Lane'],
+        Barcode=lambda wildcards: dict_Readgroup['reseq2020_SP'][wildcards.new]['Barcode'],
+        Library=lambda wildcards: dict_Readgroup['reseq2020_SP'][wildcards.new]['Library'],
+        Flowcell=lambda wildcards: dict_Readgroup['reseq2020_SP'][wildcards.new]['Flowcell']
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/reseq2020_SP3/{new}_RG_OF.log"
+    threads: 1
+    shell:
+        "(picard -Xmx2g AddOrReplaceReadGroups I={input} O={output} ID={params.Flowcell}.{params.Lane} LB=KapaBiosystems-{params.Library} PL=illumina PU={params.Flowcell}.{params.Lane}.{params.Barcode} SM={wildcards.new} CREATE_INDEX=true VALIDATION_STRINGENCY=SILENT SORT_ORDER=queryname) 2> {log}"
+
+# merge files from first two runs for samples that were run twice
+rule merge1:
+    input:
+        R2018="alignments/seq2018/{old}.deduplicated.withRG.bam",
+        R2020="alignments/reseq2020/{old}.deduplicated.withRG.bam"
+    output:
+        "alignments/merged/{old}.deduplicated_merged.bam"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{old}_merge.log"
+    threads: 1
+    shell:
+        "(picard MergeSamFiles I={input.R2018} I={input.R2020} O={output} SORT_ORDER=coordinate) 2> {log}"
+
+# merge files from all three runs for samples that were run three times
+rule merge2:
+    input:
+        R2018="alignments/seq2018/{new}.deduplicated.withRG.bam",
+        R2020="alignments/reseq2020/{new}.deduplicated.withRG.bam",
+        R2020SP="alignments/reseq2020_SP/{new}.deduplicated.withRG.bam"
+    output:
+        "alignments/merged/{new}.deduplicated_merged.bam"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{new}_merge.log"
+    threads: 1
+    shell:
+        "(picard MergeSamFiles I={input.R2018} I={input.R2020} I={input.R2020SP} O={output} SORT_ORDER=coordinate) 2> {log}"
+
+# make index
+rule index1:
+    input:
+        "alignments/merged/{sample}.deduplicated_merged.bam"
+    output:
+        "alignments/merged/{sample}.deduplicated_merged.bam.bai"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{sample}_index1.log"
+    threads: 1
+    shell:
+        "(samtools index {input}) 2> {log}"
+
+# remove reads mapping to Z chromosome and MT
+rule auto:
+    input:
+        keep="genome/chr_keep.bed",
+        alignment="alignments/merged/{sample}.deduplicated_merged.bam",
+        index="alignments/merged/{sample}.deduplicated_merged.bam.bai"
+    output:
+        "alignments/merged/{sample}.Auto.bam"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{sample}_split_Auto.log"
+    threads: 1
+    shell:
+        "(samtools view -b -L {input.keep} {input.alignment} > {output}) 2> {log}"
+
+# remove reads mapping to Z chromosome and MT
+rule zChr:
+    input:
+        alignment="alignments/merged/{sample}.deduplicated_merged.bam",
+        index="alignments/merged/{sample}.deduplicated_merged.bam.bai"
+    output:
+        "alignments/merged/{sample}.Z.bam"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{sample}_split_Z.log"
+    threads: 1
+    shell:
+        "(samtools view -b {input.alignment} NC_031799.1 > {output}) 2> {log}"
+
+# make index
+rule index:
+    input:
+        "alignments/merged/{sample}.{chr}.bam"
+    output:
+        "alignments/merged/{sample}.{chr}.bam.bai"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{sample}_index_{chr}.log"
+    threads: 1
+    shell:
+        "(samtools index {input}) 2> {log}"
+
+# build cgmap for SNP calling
+rule cgmap:
+    input:
+        Align="alignments/merged/{sample}.{chr}.bam",
+        Index="alignments/merged/{sample}.{chr}.bam.bai"
+    output:
+        "snps/CGmap/{sample}.{chr}.ATCGmap.gz"
+    log:
+        "logs/{sample}.{chr}_cgmap.log"
+    threads: 1
+    shell:
+        "(cgmaptools convert bam2cgmap -b {input.Align} -g /home/nioo/melaniel/projects/WGBS_rbc_reseq2020/genome/genome.fna --rmOverlap -o snps/CGmap/{wildcards.sample}.{wildcards.chr}) 2> {log}"
+
+# call SNPs using the bayesian model
+rule snpsBay:
+    input:
+        "snps/CGmap/{sample}.{chr}.ATCGmap.gz"
+    output:
+        "snps/{sample}.{chr}.vcf"
+    log:
+        "logs/{sample}.{chr}.log"
+    threads: 1
+    shell:
+        "(cgmaptools snv -i {input} -o snps/{wildcards.sample}..{wildcards.chr}.snv -v {output} -m bayes --bayes-dynamicP) 2> {log}"
+
+# fix VCF files
+rule CleanVCF:
+    input:
+        "snps/{sample}.{chr}.vcf"
+    output:
+        "snps/{sample}.{chr}_clean.vcf"
+    log:
+        "logs/{sample}.{chr}_RmUnidentified.log"
+    threads: 1
+    shell:
+        """
+        cat {input} | grep -vP '^#'  > {wildcards.sample}.{wildcards.chr}.vcf.body
+        cat {input} | grep -P '^#' > {output}
+        cat {wildcards.sample}.{wildcards.chr}.vcf.body | awk -v OFS='\t' '{{ if(($4!="N" && ($5=="A"||$5=="C"||$5=="G"||$5=="T"))) {{ print }} }}' >> {output}
+        rm {wildcards.sample}.{wildcards.chr}.vcf.body
+        """
+
+# make sure only SNPs selected
+rule SelectSNPs:
+    input:
+        reference="../wgbs_snakemake_reseq/genome/reference.fa",
+        VCFs="snps/{sample}.{chr}_clean.vcf"
+    output:
+        "snps/{sample}.{chr}_SNPs.vcf"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{sample}.{chr}_Select_SNPs.log"
+    threads: 1
+    shell:
+        "(gatk SelectVariants -R {input.reference} -V {input.VCFs} --select-type-to-include SNP -restrict-alleles-to BIALLELIC -O {output}) 2> {log}"
+
+rule ExtractSNPs:
+    input:
+        reference="../wgbs_snakemake_reseq/genome/reference.fa",
+        VCFs="snps/{sample}.{chr}_SNPs.vcf"
+    output:
+        "snps/{sample}.{chr}_SNPs.table"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{sample}_{chr}_ExtractSnps.log"
+    threads: 1
+    shell:
+        "(gatk VariantsToTable -R {input.reference} -V {input.VCFs} -F CHROM -F POS -F QUAL -F DP -GF GT -GF DP -GF GQ -O {output}) 2> {log}"
+
+rule FilterDepth:
+    input:
+        reference="../wgbs_snakemake_reseq/genome/reference.fa",
+        VCFs="snps/{individuals}.{chr}_SNPs.vcf"
+    output:
+        "snps/{individuals}.{chr}_SNPs_DPfilter.vcf"
+    params:
+        CovUp=lambda wildcards: dict_CovFilter_Individuals[wildcards.chr]
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{individuals}_{chr}_FilterDepth.log"
+    threads: 1
+    shell:
+        "(gatk VariantFiltration -R {input.reference} -V {input.VCFs} -G-filter 'DP < 10 || DP > {params.CovUp}' -G-filter-name 'FAIL_DP' -O {output}) 2> {log}"
+
+rule FilterDepthPools:
+    input:
+        reference="../wgbs_snakemake_reseq/genome/reference.fa",
+        VCFs="snps/{pools}.{chr}_SNPs.vcf"
+    output:
+        "snps/{pools}.{chr}_SNPs_DPfilter.vcf"
+    params:
+        CovUp=lambda wildcards: dict_CovFilter_Pools[wildcards.chr]
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{pools}_{chr}_FilterDepth.log"
+    threads: 1
+    shell:
+        "(gatk VariantFiltration -R {input.reference} -V {input.VCFs} -G-filter 'DP < 10 || DP > {params.CovUp}' -G-filter-name 'FAIL_DP' -O {output}) 2> {log}"
+
+# Set depth filtered sites to no call
+rule SetNoCall:
+    input:
+        reference="../wgbs_snakemake_reseq/genome/reference.fa",
+        VCFs="snps/{sample}.{chr}_SNPs_DPfilter.vcf"
+    output:
+        "snps/{sample}.{chr}_SNPs_DPfilter_GT.vcf"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{sample}_{chr}_FilterDepthNoCall.log"
+    threads: 1
+    shell:
+        "(gatk VariantFiltration -R {input.reference} -V {input.VCFs} --set-filtered-genotype-to-no-call -O {output}) 2> {log}"
+
+# Add sample name to header
+rule VCFSample:
+    input:
+        "snps/{sample}.{chr}_SNPs_DPfilter_GT.vcf"
+    output:
+        "snps/{sample}.{chr}_SNPs_DPfilter_GT_Name.vcf"
+    log:
+        "logs/{sample}_{chr}_vcf1.log"
+    threads: 1
+    shell:
+        "(sed -e 's/NA00001/{wildcards.sample}/g' {input} > {output}) 2> {log}"
+
+# Add sample name to header
+rule MergeSample:
+    input:
+        Auto="snps/{sample}.Auto_SNPs_DPfilter_GT_Name.vcf",
+        Z="snps/{sample}.Z_SNPs_DPfilter_GT_Name.vcf"
+    output:
+        "snps/{sample}.AllChr.vcf"
+    conda:
+        "src/env_align.yml"
+    log:
+        "logs/{sample}_vcf1.log"
+    threads: 1
+    shell:
+        "(picard -Xmx2g MergeVcfs I={input.Auto} I={input.Z} O={output}) 2> {log}"
+
+# Only keep SNPs that pass Quality check and have a genotyped
+rule FilterAgain:
+    input:
+        "snps/{sample}.AllChr.vcf"
+    output:
+        "snps/{sample}.AllChr_Good.vcf"
+    log:
+        "logs/{sample}_Filter.log"
+    threads: 1
+    shell:
+        """
+        grep -E '^#|PASS' {input}  > snps/{wildcards.sample}_temp
+        awk -v OFS='\t' 'substr($10,0,3)!="./."' snps/{wildcards.sample}_temp > {output}
+        rm snps/{wildcards.sample}_temp
+        """
+
+# make vcf.gz (+index) for downstream processing
+rule VCFgz:
+    input:
+        "snps/{sample}.AllChr_Good.vcf"
+    output:
+        "snps/{sample}.AllChr_Good.vcf.gz"
+    conda:
+        "src/env_bcftools.yml"
+    log:
+        "logs/{sample}_vcf1.log"
+    threads: 1
+    shell:
+        "(bcftools view {input} -O z -o {output}) 2> {log}"
+
+rule VCFgzIndex:
+    input:
+        "snps/{sample}.AllChr_Good.vcf.gz"
+    output:
+        "snps/{sample}.AllChr_Good.vcf.gz.tbi"
+    conda:
+        "src/env_bcftools.yml"
+    log:
+        "logs/{sample}_vcf2.log"
+    threads: 1
+    shell:
+        "(bcftools index -t {input}) 2> {log}"
+
+# merge samples in one vcf file for downstream analysis
+rule VCFmerge1:
+    input:
+        VCFs=expand("snps/{individuals}.AllChr_Good.vcf.gz", individuals=INDIVIDUALS),
+        index=expand("snps/{individuals}.AllChr_Good.vcf.gz.tbi", individuals=INDIVIDUALS)
+    output:
+        "snps/SNPs_merged.vcf.gz"
+    # conda:
+    #     "src/env_bcftools.yml"
+    log:
+        "logs/vcf_merge1.log"
+    threads: 1
+    shell:
+        "(bcftools merge {input.VCFs} -O z -o {output}) 2> {log}"
+
+rule VCFformat:
+    input:
+        vcf="snps/SNPs_merged.vcf.gz",
+        reference="../wgbs_snakemake_reseq/genome/reference.fa"
+    output:
+        "snps/SNPs_merged.bcf"
+    conda:
+        "src/env_bcftools.yml"
+    log:
+        "logs/vcf_format.log"
+    threads: 1
+    shell:
+        "(bcftools norm -O u -m -any {input.vcf} | bcftools norm -O u -f {input.reference} | bcftools annotate -O b -x ID -I +'%CHROM:%POS:%REF:%ALT' -o {output}) 2> {log}"
+
+
+# merge samples in one vcf file for downstream analysis
+rule VCFmerge2:
+    input:
+        VCFs=expand("snps/{pools}.AllChr_Good.vcf.gz", pools=POOLS),
+        index=expand("snps/{pools}.AllChr_Good.vcf.gz.tbi", pools=POOLS)
+    output:
+        "snps/SNPs_merged_POOLS.vcf.gz"
+    conda:
+        "src/env_bcftools.yml"
+    log:
+        "logs/vcf_merge1.log"
+    threads: 1
+    shell:
+        "(bcftools merge {input.VCFs} -O z -o {output}) 2> {log}"
+
+rule VCFformat2:
+    input:
+        vcf="snps/SNPs_merged_POOLS.vcf.gz",
+        reference="../wgbs_snakemake_reseq/genome/reference.fa"
+    output:
+        "snps/SNPs_merged_POOLS.bcf"
+    conda:
+        "src/env_bcftools.yml"
+    log:
+        "logs/vcf_format2.log"
+    threads: 1
+    shell:
+        "(bcftools norm -O u -m -any {input.vcf} | bcftools norm -O u -f {input.reference} | bcftools annotate -O b -x ID -I +'%CHROM:%POS:%REF:%ALT' -o {output}) 2> {log}"
